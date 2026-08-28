@@ -880,17 +880,9 @@ async def pagamento(
 # /LOJA
 # =========================================================
 
-@bot.tree.command(
-    name="loja",
-    description="Escolha seu plano"
-)
-async def loja(interaction):
-
-    embed = discord.Embed(
-        title="🏪 Marketplace",
-        description="Escolha o plano da sua loja:",
-        color=0x3498DB
-    )
-
-    embed.add_field(
-        name="🥉 Básica — R$5/mês",
+@bot.tree.command(name="loja", description="Escolha seu plano")
+async def loja(i):
+    e=discord.Embed(title="🏪 Marketplace",description="Escolha:",color=0x3498DB)
+    e.add_field(name="Basica R$5",value="basica",inline=False)
+    e.add_field(name="Premium R$15",value="premium",inline=False)
+    await i.response.send_message(embed=e,view=Planos(),ephemeral=True)
