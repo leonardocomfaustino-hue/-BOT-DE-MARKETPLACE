@@ -1,24 +1,28 @@
 import os
-import sqlite3
-from datetime import datetime, timedelta, timezone
-from threading import Thread
-
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
+from threading import Thread
 from flask import Flask
 
-
 # =========================================================
-# CONFIGURAÇÃO
+# CONFIGURACAO
 # =========================================================
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-PAYMENT_KEY = os.getenv("PAYMENT_KEY", "CONFIGURE_NO_RENDER")
 
+# No Render:
+# PAYMENT_KEY = sua chave Pix ou CPF
+PIX = os.getenv("PAYMENT_KEY", "CONFIGURE_PAYMENT_KEY")
+
+# ID da categoria onde as lojas serao criadas
+CATEGORIA_ID = 1543035058711953518
+
+# SOMENTE ESTE ID PODE APROVAR
+DONO_ID = 1503854197307871373
+
+# Precos
 PRECO_BASICA = "5,00"
 PRECO_PREMIUM = "15,00"
-
-DB_FILE = "lojas_v2.db"
 
 
 # =========================================================
@@ -34,7 +38,7 @@ bot = commands.Bot(
 
 
 # =========================================================
-# FLASK / RENDER
+# RENDER / FLASK
 # =========================================================
 
 app = Flask(__name__)
@@ -46,7 +50,10 @@ def home():
 
 
 def iniciar_web():
-    port = int(os.getenv("PORT", "10000"))
+
+    port = int(
+        os.getenv("PORT", "10000")
+    )
 
     app.run(
         host="0.0.0.0",
@@ -61,848 +68,491 @@ Thread(
 
 
 # =========================================================
-# BANCO DE DADOS
+# PAINEL DA LOJA
 # =========================================================
 
-def conectar():
+class PainelLoja(discord.ui.View):
 
-    con = sqlite3.connect(DB_FILE)
+    def __init__(self):
 
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS lojas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER NOT NULL,
-            dono_id INTEGER NOT NULL,
-            categoria_id INTEGER NOT NULL,
-            plano TEXT NOT NULL,
-            vencimento TEXT NOT NULL,
-            ativa INTEGER DEFAULT 1
+        super().__init__(
+            timeout=None
         )
-    """)
 
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS produtos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            loja_id INTEGER NOT NULL,
-            canal_id INTEGER NOT NULL,
-            nome TEXT NOT NULL,
-            descricao TEXT,
-            preco TEXT NOT NULL,
-            estoque INTEGER NOT NULL,
-            pagamento TEXT NOT NULL
+    # -----------------------------------------------------
+    # PLANO BASICO
+    # -----------------------------------------------------
+
+    @discord.ui.button(
+        label="Basica - R$5,00",
+        style=discord.ButtonStyle.green,
+        custom_id="comprar_basica"
+    )
+    async def basica(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        await criar_pagamento(
+            interaction,
+            "Basica",
+            PRECO_BASICA
         )
-    """)
 
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS pagamentos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER NOT NULL,
-            usuario_id INTEGER NOT NULL,
-            plano TEXT NOT NULL,
-            valor TEXT NOT NULL,
-            canal_id INTEGER NOT NULL,
-            tipo TEXT NOT NULL,
-            aprovado INTEGER DEFAULT 0
+    # -----------------------------------------------------
+    # PLANO PREMIUM
+    # -----------------------------------------------------
+
+    @discord.ui.button(
+        label="Premium - R$15,00",
+        style=discord.ButtonStyle.blurple,
+        custom_id="comprar_premium"
+    )
+    async def premium(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        await criar_pagamento(
+            interaction,
+            "Premium",
+            PRECO_PREMIUM
         )
-    """)
-
-    con.commit()
-
-    return con
-
-
-conectar().close()
 
 
 # =========================================================
-# FUNÇÕES DO BANCO
+# PAGAMENTO
 # =========================================================
 
-def buscar_loja(guild_id, dono_id):
-
-    con = conectar()
-
-    loja = con.execute("""
-        SELECT *
-        FROM lojas
-        WHERE guild_id = ?
-        AND dono_id = ?
-        AND ativa = 1
-        ORDER BY id DESC
-        LIMIT 1
-    """, (
-        guild_id,
-        dono_id
-    )).fetchone()
-
-    con.close()
-
-    return loja
-
-
-def buscar_loja_por_categoria(categoria_id):
-
-    if not categoria_id:
-        return None
-
-    con = conectar()
-
-    loja = con.execute("""
-        SELECT *
-        FROM lojas
-        WHERE categoria_id = ?
-        AND ativa = 1
-        LIMIT 1
-    """, (
-        categoria_id,
-    )).fetchone()
-
-    con.close()
-
-    return loja
-
-
-def buscar_produto(produto_id):
-
-    con = conectar()
-
-    produto = con.execute("""
-        SELECT *
-        FROM produtos
-        WHERE id = ?
-    """, (
-        produto_id,
-    )).fetchone()
-
-    con.close()
-
-    return produto
-
-
-def buscar_pagamento_por_canal(canal_id):
-
-    con = conectar()
-
-    pagamento = con.execute("""
-        SELECT *
-        FROM pagamentos
-        WHERE canal_id = ?
-        ORDER BY id DESC
-        LIMIT 1
-    """, (
-        canal_id,
-    )).fetchone()
-
-    con.close()
-
-    return pagamento
-# =========================================================
-# VERIFICAR LOJAS EXPIRADAS
-# =========================================================
-
-async def verificar_lojas_expiradas():
-
-    agora = datetime.now(timezone.utc)
-
-    con = conectar()
-
-    lojas = con.execute("""
-        SELECT *
-        FROM lojas
-        WHERE ativa = 1
-    """).fetchall()
-
-    for loja in lojas:
-
-        try:
-            vencimento = datetime.fromisoformat(
-                loja[5]
-            )
-
-        except Exception:
-            continue
-
-        if vencimento <= agora:
-
-            con.execute("""
-                UPDATE lojas
-                SET ativa = 0
-                WHERE id = ?
-            """, (
-                loja[0],
-            ))
-
-            guild = bot.get_guild(
-                loja[1]
-            )
-
-            if guild:
-
-                categoria = guild.get_channel(
-                    loja[3]
-                )
-
-                if categoria:
-
-                    try:
-
-                        await categoria.set_permissions(
-                            guild.default_role,
-                            view_channel=False
-                        )
-
-                    except Exception:
-                        pass
-
-    con.commit()
-    con.close()
-
-
-@tasks.loop(minutes=10)
-async def verificar_expiracoes():
-
-    await verificar_lojas_expiradas()
-
-
-# =========================================================
-# EMBED DO PRODUTO
-# =========================================================
-
-async def enviar_produto(
-    canal,
-    produto_id,
-    nome,
-    descricao,
-    preco,
-    estoque,
-    pagamento
+async def criar_pagamento(
+    interaction: discord.Interaction,
+    plano: str,
+    valor: str
 ):
 
-    if estoque == -1:
-        estoque_texto = "♾️ Ilimitado"
-    else:
-        estoque_texto = str(estoque)
+    guild = interaction.guild
+    usuario = interaction.user
 
-    embed = discord.Embed(
-        title=f"📦 {nome}",
-        description=descricao or "Sem descrição.",
-        color=0x2ECC71
-    )
+    if guild is None:
 
-    embed.add_field(
-        name="💰 Preço",
-        value=f"**R${preco}**",
-        inline=True
-    )
-
-    embed.add_field(
-        name="📦 Estoque",
-        value=estoque_texto,
-        inline=True
-    )
-
-    embed.add_field(
-        name="💳 Pagamento",
-        value=pagamento,
-        inline=False
-    )
-
-    embed.set_footer(
-        text=f"ID do produto: {produto_id}"
-    )
-
-    await canal.send(
-        embed=embed
-    )
-
-
-# =========================================================
-# MODAL - ADICIONAR PRODUTO
-# =========================================================
-
-class AdicionarProdutoModal(discord.ui.Modal):
-
-    def __init__(self):
-
-        super().__init__(
-            title="📦 Adicionar Produto"
-        )
-
-    nome = discord.ui.TextInput(
-        label="Nome do produto",
-        placeholder="Ex: Pack de Emotes",
-        max_length=100
-    )
-
-    descricao = discord.ui.TextInput(
-        label="Descrição",
-        placeholder="Descrição do produto",
-        style=discord.TextStyle.paragraph,
-        required=False,
-        max_length=500
-    )
-
-    preco = discord.ui.TextInput(
-        label="Preço",
-        placeholder="5,00",
-        max_length=30
-    )
-
-    estoque = discord.ui.TextInput(
-        label="Estoque",
-        placeholder="10 ou ilimitado",
-        max_length=30
-    )
-
-    pagamento = discord.ui.TextInput(
-        label="Forma de pagamento",
-        placeholder="Pix / Mercado Pago",
-        max_length=100
-    )
-
-    async def on_submit(
-        self,
-        interaction: discord.Interaction
-    ):
-
-        if not interaction.guild:
-
-            return await interaction.response.send_message(
-                "❌ Este comando só funciona em servidor.",
-                ephemeral=True
-            )
-
-        loja = buscar_loja_por_categoria(
-            interaction.channel.category_id
-        )
-
-        if not loja:
-
-            return await interaction.response.send_message(
-                "❌ Este canal não pertence a uma loja.",
-                ephemeral=True
-            )
-
-        if interaction.user.id != loja[2]:
-
-            return await interaction.response.send_message(
-                "❌ Apenas o dono da loja pode adicionar produtos.",
-                ephemeral=True
-            )
-
-        valor_estoque = self.estoque.value.strip()
-
-        if valor_estoque.lower() == "ilimitado":
-
-            estoque = -1
-
-        else:
-
-            try:
-
-                estoque = int(
-                    valor_estoque
-                )
-
-                if estoque < 0:
-                    raise ValueError
-
-            except ValueError:
-
-                return await interaction.response.send_message(
-                    "❌ Estoque inválido. Use um número ou `ilimitado`.",
-                    ephemeral=True
-                )
-
-        con = conectar()
-
-        cursor = con.execute("""
-            INSERT INTO produtos (
-                loja_id,
-                canal_id,
-                nome,
-                descricao,
-                preco,
-                estoque,
-                pagamento
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            loja[0],
-            interaction.channel.id,
-            self.nome.value.strip(),
-            self.descricao.value.strip(),
-            self.preco.value.strip(),
-            estoque,
-            self.pagamento.value.strip()
-        ))
-
-        produto_id = cursor.lastrowid
-
-        con.commit()
-        con.close()
-
-        await enviar_produto(
-            interaction.channel,
-            produto_id,
-            self.nome.value.strip(),
-            self.descricao.value.strip(),
-            self.preco.value.strip(),
-            estoque,
-            self.pagamento.value.strip()
-        )
-
-        await interaction.response.send_message(
-            "✅ Produto adicionado com sucesso!",
-            ephemeral=True
-        )
-# =========================================================
-# MODAL - EDITAR PRODUTO
-# =========================================================
-
-class EditarProdutoModal(discord.ui.Modal):
-
-    def __init__(self):
-
-        super().__init__(
-            title="✏️ Editar Produto"
-        )
-
-    produto_id = discord.ui.TextInput(
-        label="ID do produto",
-        placeholder="Ex: 1",
-        max_length=20
-    )
-
-    nome = discord.ui.TextInput(
-        label="Novo nome",
-        required=False,
-        max_length=100
-    )
-
-    preco = discord.ui.TextInput(
-        label="Novo preço",
-        required=False,
-        max_length=30
-    )
-
-    estoque = discord.ui.TextInput(
-        label="Novo estoque",
-        placeholder="10 ou ilimitado",
-        required=False,
-        max_length=30
-    )
-
-    pagamento = discord.ui.TextInput(
-        label="Novo pagamento",
-        required=False,
-        max_length=100
-    )
-
-    async def on_submit(
-        self,
-        interaction: discord.Interaction
-    ):
-
-        if not interaction.guild:
-
-            return await interaction.response.send_message(
-                "❌ Este comando só funciona em servidor.",
-                ephemeral=True
-            )
-
-        try:
-
-            pid = int(
-                self.produto_id.value.strip()
-            )
-
-        except ValueError:
-
-            return await interaction.response.send_message(
-                "❌ ID inválido.",
-                ephemeral=True
-            )
-
-        produto = buscar_produto(pid)
-
-        if not produto:
-
-            return await interaction.response.send_message(
-                "❌ Produto não encontrado.",
-                ephemeral=True
-            )
-
-        loja = buscar_loja(
-            interaction.guild.id,
-            interaction.user.id
-        )
-
-        if not loja or produto[1] != loja[0]:
-
-            return await interaction.response.send_message(
-                "❌ Esse produto não pertence à sua loja.",
-                ephemeral=True
-            )
-
-        nome = (
-            self.nome.value.strip()
-            if self.nome.value.strip()
-            else produto[3]
-        )
-
-        preco = (
-            self.preco.value.strip()
-            if self.preco.value.strip()
-            else produto[5]
-        )
-
-        pagamento = (
-            self.pagamento.value.strip()
-            if self.pagamento.value.strip()
-            else produto[7]
-        )
-
-        estoque_input = self.estoque.value.strip()
-
-        if estoque_input:
-
-            if estoque_input.lower() == "ilimitado":
-
-                estoque = -1
-
-            else:
-
-                try:
-
-                    estoque = int(
-                        estoque_input
-                    )
-
-                    if estoque < 0:
-                        raise ValueError
-
-                except ValueError:
-
-                    return await interaction.response.send_message(
-                        "❌ Estoque inválido.",
-                        ephemeral=True
-                    )
-
-        else:
-
-            estoque = produto[6]
-
-        con = conectar()
-
-        con.execute("""
-            UPDATE produtos
-            SET nome = ?,
-                preco = ?,
-                estoque = ?,
-                pagamento = ?
-            WHERE id = ?
-        """, (
-            nome,
-            preco,
-            estoque,
-            pagamento,
-            pid
-        ))
-
-        con.commit()
-        con.close()
-
-        await interaction.response.send_message(
-            "✅ Produto atualizado com sucesso!",
+        return await interaction.response.send_message(
+            "Esse comando so funciona em servidor.",
             ephemeral=True
         )
 
+    # -----------------------------------------------------
+    # NOME DO CANAL DE PAGAMENTO
+    # -----------------------------------------------------
 
-# =========================================================
-# MODAL - EXCLUIR PRODUTO
-# =========================================================
-
-class ExcluirProdutoModal(discord.ui.Modal):
-
-    def __init__(self):
-
-        super().__init__(
-            title="🗑️ Excluir Produto"
-        )
-
-    produto_id = discord.ui.TextInput(
-        label="ID do produto",
-        placeholder="Ex: 1",
-        max_length=20
+    nome_usuario = (
+        usuario.name
+        .lower()
+        .replace(" ", "-")
     )
 
-    async def on_submit(
-        self,
-        interaction: discord.Interaction
-    ):
-
-        if not interaction.guild:
-
-            return await interaction.response.send_message(
-                "❌ Este comando só funciona em servidor.",
-                ephemeral=True
-            )
-
-        try:
-
-            pid = int(
-                self.produto_id.value.strip()
-            )
-
-        except ValueError:
-
-            return await interaction.response.send_message(
-                "❌ ID inválido.",
-                ephemeral=True
-            )
-
-        produto = buscar_produto(pid)
-
-        if not produto:
-
-            return await interaction.response.send_message(
-                "❌ Produto não encontrado.",
-                ephemeral=True
-            )
-
-        loja = buscar_loja(
-            interaction.guild.id,
-            interaction.user.id
-        )
-
-        if not loja or produto[1] != loja[0]:
-
-            return await interaction.response.send_message(
-                "❌ Esse produto não pertence à sua loja.",
-                ephemeral=True
-            )
-
-        con = conectar()
-
-        con.execute("""
-            DELETE FROM produtos
-            WHERE id = ?
-        """, (
-            pid,
-        ))
-
-        con.commit()
-        con.close()
-
-        await interaction.response.send_message(
-            "🗑️ Produto excluído com sucesso!",
-            ephemeral=True
-        )
-
-
-# =========================================================
-# MODAL - CRIAR CANAL
-# =========================================================
-
-class CriarCanalModal(discord.ui.Modal):
-
-    def __init__(self):
-
-        super().__init__(
-            title="➕ Criar Canal"
-        )
-
-    nome = discord.ui.TextInput(
-        label="Nome do canal",
-        placeholder="ofertas",
-        max_length=80
+    nome_canal = (
+        f"pagamento-{nome_usuario}"
     )
 
-    async def on_submit(
-        self,
-        interaction: discord.Interaction
-    ):
+    canal = await guild.create_text_channel(
+        nome_canal
+    )
 
-        if not interaction.guild:
+    # -----------------------------------------------------
+    # PERMISSOES
+    # -----------------------------------------------------
 
-            return await interaction.response.send_message(
-                "❌ Este comando só funciona em servidor.",
-                ephemeral=True
-            )
+    # Ninguem ve
+    await canal.set_permissions(
+        guild.default_role,
+        view_channel=False
+    )
 
-        loja = buscar_loja(
-            interaction.guild.id,
-            interaction.user.id
-        )
+    # Cliente ve
+    await canal.set_permissions(
+        usuario,
+        view_channel=True,
+        send_messages=True,
+        read_message_history=True
+    )
 
-        if not loja:
+    # Voce ve
+    dono = guild.get_member(
+        DONO_ID
+    )
 
-            return await interaction.response.send_message(
-                "❌ Você não possui uma loja ativa.",
-                ephemeral=True
-            )
-
-        categoria = interaction.guild.get_channel(
-            loja[3]
-        )
-
-        if not categoria:
-
-            return await interaction.response.send_message(
-                "❌ Categoria da loja não encontrada.",
-                ephemeral=True
-            )
-
-        nome = (
-            self.nome.value.strip()
-            .lower()
-            .replace(" ", "-")
-        )
-
-        canal = await interaction.guild.create_text_channel(
-            nome,
-            category=categoria
-        )
+    if dono:
 
         await canal.set_permissions(
-            interaction.guild.default_role,
-            view_channel=False
-        )
-
-        await canal.set_permissions(
-            interaction.user,
+            dono,
             view_channel=True,
             send_messages=True,
             read_message_history=True
         )
 
-        await interaction.response.send_message(
-            f"✅ Canal criado com sucesso: {canal.mention}",
-            ephemeral=True
+    # -----------------------------------------------------
+    # PAGAMENTO
+    # -----------------------------------------------------
+
+    embed = discord.Embed(
+        title="Pagamento da Loja",
+        description=(
+            f"Cliente: {usuario.mention}\n\n"
+            f"Plano: **{plano}**\n"
+            f"Valor: **R${valor}**\n\n"
+            f"Pix:\n"
+            f"`{PIX}`\n\n"
+            "Faca o pagamento e envie o comprovante "
+            "neste canal.\n\n"
+            "Depois aguarde a aprovacao."
+        ),
+        color=0xF1C40F
+    )
+
+    embed.set_footer(
+        text="Pagamento manual"
+    )
+
+    await canal.send(
+        embed=embed,
+        view=AprovarPagamento(
+            usuario.id,
+            plano,
+            valor
         )
+    )
+
+    await interaction.response.send_message(
+        f"Canal de pagamento criado: {canal.mention}",
+        ephemeral=True
+    )
+
+
 # =========================================================
-# MODAL - NOME DA LOJA
+# APROVACAO
 # =========================================================
 
-class NomeLojaModal(discord.ui.Modal):
+class AprovarPagamento(discord.ui.View):
 
     def __init__(
         self,
-        usuario_id,
-        plano,
-        pagamento_id
+        usuario_id: int,
+        plano: str,
+        valor: str
     ):
 
         super().__init__(
-            title="🏪 Criar sua Loja"
+            timeout=None
         )
 
         self.usuario_id = usuario_id
         self.plano = plano
-        self.pagamento_id = pagamento_id
+        self.valor = valor
 
-    nome = discord.ui.TextInput(
-        label="Nome do canal principal",
-        placeholder="minha-loja",
-        max_length=80
+    @discord.ui.button(
+        label="Aprovar pagamento",
+        style=discord.ButtonStyle.green,
+        custom_id="aprovar_pagamento"
     )
-
-    async def on_submit(
+    async def aprovar(
         self,
-        interaction: discord.Interaction
+        interaction: discord.Interaction,
+        button: discord.ui.Button
     ):
 
-        if not interaction.guild:
+        # =================================================
+        # SOMENTE VOCE PODE APROVAR
+        # =================================================
+
+        if interaction.user.id != DONO_ID:
 
             return await interaction.response.send_message(
-                "❌ Este comando só funciona em servidor.",
+                "Voce nao tem permissao para aprovar pagamentos.",
                 ephemeral=True
             )
 
         guild = interaction.guild
 
+        if guild is None:
+
+            return await interaction.response.send_message(
+                "Servidor nao encontrado.",
+                ephemeral=True
+            )
+
+        # -------------------------------------------------
+        # ENCONTRAR CLIENTE
+        # -------------------------------------------------
+
         membro = guild.get_member(
             self.usuario_id
         )
 
-        if not membro:
+        if membro is None:
 
-            return await interaction.response.send_message(
-                "❌ Usuário não encontrado.",
-                ephemeral=True
-            )
+            try:
 
-        loja_existente = buscar_loja(
-            guild.id,
-            self.usuario_id
-        )
+                membro = await guild.fetch_member(
+                    self.usuario_id
+                )
 
-        if loja_existente:
+            except:
 
-            return await interaction.response.send_message(
-                "❌ Este usuário já possui uma loja ativa.",
-                ephemeral=True
-            )
+                return await interaction.response.send_message(
+                    "Nao consegui encontrar o cliente.",
+                    ephemeral=True
+                )
 
-        nome = (
-            self.nome.value.strip()
-            .lower()
-            .replace(" ", "-")
-        )
+        # -------------------------------------------------
+        # ENCONTRAR CATEGORIA
+        # -------------------------------------------------
 
-        # =================================================
-        # CATEGORIA DAS LOJAS
-        # =================================================
-
-        categoria = discord.utils.get(
-            guild.categories,
-            name="🏪・LOJAS"
+        categoria = guild.get_channel(
+            CATEGORIA_ID
         )
 
         if categoria is None:
 
-            categoria = await guild.create_category(
-                "🏪・LOJAS"
+            return await interaction.response.send_message(
+                f"A categoria {CATEGORIA_ID} nao foi encontrada.",
+                ephemeral=True
             )
 
-        # Ninguém vê a categoria por padrão
-        await categoria.set_permissions(
+        # -------------------------------------------------
+        # NOME DA LOJA
+        # -------------------------------------------------
+
+        nome_usuario = (
+            membro.display_name
+            .lower()
+            .replace(" ", "-")
+        )
+
+        nome_canal = (
+            f"loja-de-{nome_usuario}"
+        )
+
+        # -------------------------------------------------
+        # VERIFICAR SE JA EXISTE
+        # -------------------------------------------------
+
+        for canal_existente in categoria.channels:
+
+            if canal_existente.name == nome_canal:
+
+                return await interaction.response.send_message(
+                    f"Esse usuario ja possui uma loja: "
+                    f"{canal_existente.mention}",
+                    ephemeral=True
+                )
+
+        # -------------------------------------------------
+        # CRIAR LOJA
+        # -------------------------------------------------
+
+        canal = await guild.create_text_channel(
+            nome_canal,
+            category=categoria
+        )
+
+        # Ninguem ve
+        await canal.set_permissions(
             guild.default_role,
             view_channel=False
         )
 
-        # Dono da loja vê
-        await categoria.set_permissions(
+        # Cliente ve
+        await canal.set_permissions(
             membro,
             view_channel=True,
             send_messages=True,
             read_message_history=True
         )
 
-        # =================================================
-        # CANAL PRINCIPAL
-        # =================================================
-
-        canal = await guild.create_text_channel(
-            nome,
-            category=categoria
+        # Voce ve
+        dono = guild.get_member(
+            DONO_ID
         )
 
-        # =================================================
-        # VENCIMENTO
-        # =================================================
+        if dono:
 
-        vencimento = (
-            datetime.now(timezone.utc)
-            + timedelta(days=30)
+            await canal.set_permissions(
+                dono,
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True
+            )
+
+        # -------------------------------------------------
+        # MENSAGEM DA LOJA
+        # -------------------------------------------------
+
+        embed = discord.Embed(
+            title="Sua Loja",
+            description=(
+                f"Olá, {membro.mention}!\n\n"
+                "Seu pagamento foi aprovado.\n"
+                "Sua loja foi criada com sucesso."
+            ),
+            color=0x3498DB
         )
 
-        # =================================================
-        # SALVAR LOJA
-        # =================================================
+        embed.add_field(
+            name="Plano",
+            value=self.plano,
+            inline=True
+        )
 
-        con = conectar()
+        embed.add_field(
+            name="Valor",
+            value=f"R${self.valor}",
+            inline=True
+        )
 
-        cursor = con.execute("""
-            INSER
+        embed.add_field(
+            name="Dono",
+            value=membro.mention,
+            inline=False
+        )
+
+        await canal.send(
+            embed=embed
+        )
+
+        # -------------------------------------------------
+        # AVISO PARA VOCE
+        # -------------------------------------------------
+
+        await interaction.response.send_message(
+            f"Pagamento aprovado.\n"
+            f"Loja criada: {canal.mention}",
+            ephemeral=True
+        )
+
+        # -------------------------------------------------
+        # DESATIVAR BOTAO
+        # -------------------------------------------------
+
+        button.disabled = True
+
+        try:
+
+            await interaction.message.edit(
+                view=self
+            )
+
+        except:
+            pass
+
+        # -------------------------------------------------
+        # AVISAR CLIENTE NO PRIVADO
+        # -------------------------------------------------
+
+        try:
+
+            await membro.send(
+                f"Seu pagamento foi aprovado!\n\n"
+                f"Sua loja foi criada no servidor "
+                f"{guild.name}.\n"
+                f"Canal: {canal.mention}"
+            )
+
+        except:
+            pass
+
+
+# =========================================================
+# COMANDO /LOJA
+# =========================================================
+
+@bot.tree.command(
+    name="loja",
+    description="Abrir o painel de compra de lojas"
+)
+async def loja(
+    interaction: discord.Interaction
+):
+
+    embed = discord.Embed(
+        title="Marketplace",
+        description=(
+            "Crie sua propria loja no servidor.\n\n"
+            "Escolha um plano abaixo:"
+        ),
+        color=0x3498DB
+    )
+
+    embed.add_field(
+        name="Loja Basica",
+        value=(
+            "Valor: **R$5,00**\n"
+            "Loja basica"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="Loja Premium",
+        value=(
+            "Valor: **R$15,00**\n"
+            "Loja premium"
+        ),
+        inline=False
+    )
+
+    embed.set_footer(
+        text="Escolha um plano para continuar."
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        view=PainelLoja(),
+        ephemeral=True
+    )
+
+
+# =========================================================
+# BOT ONLINE
+# =========================================================
+
+@bot.event
+async def on_ready():
+
+    print(
+        f"Bot conectado como {bot.user}"
+    )
+
+    try:
+
+        bot.add_view(
+            PainelLoja()
+        )
+
+        await bot.tree.sync()
+
+        print(
+            "Comando /loja sincronizado."
+        )
+
+    except Exception as erro:
+
+        print(
+            f"Erro ao sincronizar comandos: {erro}"
+        )
+
+
+# =========================================================
+# INICIAR
+# =========================================================
+
+if not TOKEN:
+
+    print(
+        "ERRO: DISCORD_TOKEN nao foi configurado."
+    )
+
+else:
+
+    bot.run(TOKEN)
